@@ -115,13 +115,73 @@ def predict_bd(image_path):
 
 def dual_predict(image_path):
 
-    pv_label, pv_conf = predict_pv(image_path)
-    bd_label, bd_conf = predict_bd(image_path)
+    # -------- PlantVillage Prediction --------
+    pv_model = tf.keras.models.load_model("plantvillage_resnet50.keras")
 
+    with open("labels.json") as f:
+        pv_classes = json.load(f)
+
+    img = Image.open(image_path).convert("RGB").resize((224,224))
+    img_np = np.array(img)/255.0
+    img_np = np.expand_dims(img_np,0)
+
+    preds = pv_model.predict(img_np, verbose=0)[0]
+    pv_conf = float(np.max(preds))
+    pv_idx = int(np.argmax(preds))
+    pv_label = re.sub("_+"," ", pv_classes[pv_idx]).title()
+
+    # FREE MEMORY
+    del pv_model
+    import gc
+    gc.collect()
+
+    # -------- BD MODEL Prediction --------
+    model_bd = models.resnet50(weights=None)
+
+    num_ftrs = model_bd.fc.in_features
+    model_bd.fc = torch.nn.Sequential(
+        torch.nn.Linear(num_ftrs,512),
+        torch.nn.ReLU(),
+        torch.nn.Dropout(0.2),
+        torch.nn.Linear(512,94)
+    )
+
+    checkpoint = torch.load("bd_model.pth", map_location="cpu")
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+    state_dict = {k.replace("module.",""):v for k,v in state_dict.items()}
+    model_bd.load_state_dict(state_dict)
+    model_bd.eval()
+
+    with open("class_mapping.json") as f:
+        bd_classes = json.load(f)
+
+    transform_bd = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.485,0.456,0.406],
+            std=[0.229,0.224,0.225]
+        )
+    ])
+
+    tensor = transform_bd(img).unsqueeze(0)
+
+    with torch.no_grad():
+        outputs = model_bd(tensor)
+        probs = torch.nn.functional.softmax(outputs, dim=1)[0]
+
+    bd_conf, bd_idx = torch.max(probs,0)
+    bd_label = re.sub("_+"," ", bd_classes[str(bd_idx.item())]).title()
+
+    del model_bd
+    gc.collect()
+
+    # -------- FINAL SELECTION --------
     if pv_conf > bd_conf:
         return pv_label, pv_conf, "PlantVillage Model"
 
-    return bd_label, bd_conf, "BD Dataset Model"
+    return bd_label, float(bd_conf), "BD Dataset Model"
 
 
 # =====================================================
@@ -184,3 +244,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
 
     uvicorn.run("main:app", host="0.0.0.0", port=port)
+
